@@ -38,14 +38,16 @@ Estamos gestionando una firma digital gratuita para proyectos open source (vía 
 
 ## Compilar manualmente
 
-Si preferís compilarlo vos mismo en lugar de bajar el artifact de Actions:
+El build "oficial" de este proyecto usa **Nuitka** (no PyInstaller) con el ícono de marca embebido. Desde la carpeta del repo, con MSYS2/MINGW64 o cualquier consola con Python en PATH:
 
 ```bash
-pip install pyinstaller
-pyinstaller --onefile --windowed --name "VR-Calibrador" "Calibrador_VR-Simulacion.py"
+pip install nuitka
+python -m nuitka --onefile --windows-console-mode=disable --enable-plugin=tk-inter --windows-icon-from-ico=logosolovr.ico --include-package=customtkinter --include-package=PIL --include-package=pygame "Calibrador_VR-Simulacion.py"
 ```
 
-El ejecutable queda en `dist/VR-Calibrador.exe`.
+El `.ico` (`logosolovr.ico`) ya está en la raíz del repo. El ejecutable resultante queda en la misma carpeta, con el ícono de la marca aplicado.
+
+> El workflow automático de GitHub Actions (`.github/workflows/build.yml`) usa exactamente este mismo comando, así que el `.exe` que bajás de la pestaña Actions es idéntico al que se distribuye a clientes (mismo ícono, mismo build).
 
 ## Licencia
 
