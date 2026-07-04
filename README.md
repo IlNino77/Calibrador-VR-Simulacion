@@ -24,7 +24,9 @@ python "Calibrador_VR-Simulacion.py"
 
 ## Descargar el ejecutable
 
-El `.exe` para Windows se compila automáticamente en cada cambio, vía GitHub Actions. Lo encontrás en la pestaña **[Actions](../../actions)** de este repo → entrá al build más reciente con ✅ → sección **Artifacts** → `VR-Calibrador-windows`.
+La forma recomendada es la pestaña **[Releases](../../releases)**: ahí vas a encontrar siempre la última versión estable, ya compilada, lista para descargar y ejecutar (`VR-Calibrador.exe`).
+
+Alternativamente, cada cambio en `main` también genera un build de verificación en **[Actions](../../actions)** → build más reciente con ✅ → sección **Artifacts** → `VR-Calibrador-windows` (útil para probar cambios antes de que salgan en una Release oficial).
 
 ### ⚠️ Sobre el aviso de Windows ("Smart App Control" / SmartScreen)
 
