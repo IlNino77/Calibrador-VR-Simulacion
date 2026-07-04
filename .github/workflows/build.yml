@@ -22,11 +22,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install nuitka
+          pip install pyinstaller
 
       - name: Compilar exe
         run: |
-          python -m nuitka --onefile --assume-yes-for-downloads --windows-console-mode=disable --enable-plugin=tk-inter --windows-icon-from-ico=logosolovr.ico --include-package=customtkinter --include-package=PIL --include-package=pygame --output-filename=VR-Calibrador.exe "Calibrador_VR-Simulacion.py"
+          pyinstaller --onefile --windowed --icon=logosolovr.ico --name=VR-Calibrador --collect-all customtkinter "Calibrador_VR-Simulacion.py"
+
+      - name: Mover exe a la raiz
+        run: |
+          move dist\VR-Calibrador.exe VR-Calibrador.exe
 
       - name: Subir exe como artifact
         uses: actions/upload-artifact@v4
