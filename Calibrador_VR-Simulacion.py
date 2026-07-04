@@ -64,9 +64,9 @@ def _build_logo_photo(size):
 CURVE_TYPES = ["Lineal", "Exponencial", "Logarítmica", "S-Curve", "Personalizada"]
 
 PEDALES = [
-    {"key": "acelerador", "label": "Acelerador", "color": ACCENT,  "axis": 0},  # RyAxis → pedal acelerador
-    {"key": "freno",      "label": "Freno",       "color": ACCENT2, "axis": 1},  # Throttle → pedal freno
     {"key": "embrague",   "label": "Embrague",    "color": ACCENT3, "axis": 2},  # Brake → pedal embrague
+    {"key": "freno",      "label": "Freno",       "color": ACCENT2, "axis": 1},  # Throttle → pedal freno
+    {"key": "acelerador", "label": "Acelerador", "color": ACCENT,  "axis": 0},  # RyAxis → pedal acelerador
 ]
 
 
