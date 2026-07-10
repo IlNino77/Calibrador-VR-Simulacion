@@ -24,7 +24,9 @@ python "Calibrador_VR-Simulacion.py"
 
 ## Descargar el ejecutable
 
-El `.exe` para Windows se compila automáticamente en cada cambio, vía GitHub Actions. Lo encontrás en la pestaña **[Actions](../../actions)** de este repo → entrá al build más reciente con ✅ → sección **Artifacts** → `VR-Calibrador-windows`.
+La forma recomendada es la pestaña **[Releases](../../releases)**: ahí vas a encontrar siempre la última versión estable, ya compilada, lista para descargar y ejecutar (`VR-Calibrador.exe`).
+
+Alternativamente, cada cambio en `main` también genera un build de verificación en **[Actions](../../actions)** → build más reciente con ✅ → sección **Artifacts** → `VR-Calibrador-windows` (útil para probar cambios antes de que salgan en una Release oficial).
 
 ### ⚠️ Sobre el aviso de Windows ("Smart App Control" / SmartScreen)
 
@@ -38,14 +40,14 @@ Estamos gestionando una firma digital gratuita para proyectos open source (vía 
 
 ## Compilar manualmente
 
-El build "oficial" de este proyecto usa **Nuitka** (no PyInstaller) con el ícono de marca embebido. Desde la carpeta del repo, con MSYS2/MINGW64 o cualquier consola con Python en PATH:
+El build "oficial" de este proyecto usa **PyInstaller** con el ícono de marca embebido. Desde la carpeta del repo, con Python en PATH:
 
 ```bash
-pip install nuitka
-python -m nuitka --onefile --windows-console-mode=disable --enable-plugin=tk-inter --windows-icon-from-ico=logosolovr.ico --include-package=customtkinter --include-package=PIL --include-package=pygame "Calibrador_VR-Simulacion.py"
+pip install pyinstaller
+pyinstaller --onefile --windowed --icon=logosolovr.ico --name=VR-Calibrador --collect-all customtkinter "Calibrador_VR-Simulacion.py"
 ```
 
-El `.ico` (`logosolovr.ico`) ya está en la raíz del repo. El ejecutable resultante queda en la misma carpeta, con el ícono de la marca aplicado.
+El `.ico` (`logosolovr.ico`) ya está en la raíz del repo. El ejecutable resultante queda en la carpeta `dist/`, con el ícono de la marca aplicado tanto en el archivo como en la ventana en tiempo de ejecución.
 
 > El workflow automático de GitHub Actions (`.github/workflows/build.yml`) usa exactamente este mismo comando, así que el `.exe` que bajás de la pestaña Actions es idéntico al que se distribuye a clientes (mismo ícono, mismo build).
 
