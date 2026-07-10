@@ -443,6 +443,7 @@ class AxisPanel(ctk.CTkFrame):
         _hint = next((p["axis"] for p in PEDALES if p["key"] == axis_key), 0)
         self.var_di_axis = ctk.StringVar(value=str(_hint))
         self.var_center  = ctk.StringVar(value="")  # vacio = usa MIN como centro
+        self._win_cal    = None  # (lo, ce, hi) cacheado del registro, o None
 
         self._build()
 
@@ -459,7 +460,10 @@ class AxisPanel(ctk.CTkFrame):
         top.pack(fill="both", expand=True, padx=8)
 
         self.bar = PedalCanvas(top, self.label, self.color, width=70, height=180)
-        self.bar.pack(side="left", fill="y", padx=(0,6))
+        self.bar.pack(side="left", fill="y", padx=(0,4))
+
+        self.bar_win = PedalCanvas(top, "WIN", "#6b7280", width=70, height=180)
+        self.bar_win.pack(side="left", fill="y", padx=(0,6))
 
         self.curve = CurveCanvas(top, width=140, height=180)
         self.curve.pack(side="left", fill="both", expand=True)
@@ -482,17 +486,6 @@ class AxisPanel(ctk.CTkFrame):
                            command=lambda v=var: v.set(str(self._raw_corrected(self.app.get_raw(self.axis_key))))
                            ).pack(side="left")
 
-        dz = ctk.CTkFrame(ctrl, fg_color="transparent")
-        dz.pack(fill="x", pady=(3,0))
-        ctk.CTkLabel(dz, text="DZ bajo", width=55, font=FONT_MONO,
-                     text_color=TEXT_DIM).pack(side="left")
-        ctk.CTkEntry(dz, textvariable=self.var_dz_low, width=52,
-                      font=FONT_MONO, fg_color=BG, border_color=BORDER).pack(side="left", padx=3)
-        ctk.CTkLabel(dz, text="DZ alto", width=55, font=FONT_MONO,
-                     text_color=TEXT_DIM).pack(side="left")
-        ctk.CTkEntry(dz, textvariable=self.var_dz_high, width=52,
-                      font=FONT_MONO, fg_color=BG, border_color=BORDER).pack(side="left", padx=3)
-
         cr = ctk.CTkFrame(ctrl, fg_color="transparent")
         cr.pack(fill="x", pady=3)
         ctk.CTkLabel(cr, text="Curva", width=55, font=FONT_MONO,
@@ -514,90 +507,129 @@ class AxisPanel(ctk.CTkFrame):
                           border_color=BORDER, checkbox_width=18,
                           checkbox_height=18).pack(side="left")
 
-        # ── Calibración fija de Windows (opcional, avanzado) ──
+        # ── Calibración fija de Windows ──
         win = ctk.CTkFrame(ctrl, fg_color="transparent")
         win.pack(fill="x", pady=(6,0))
-        ctk.CTkLabel(win, text="Eje DirectInput", width=90, font=FONT_MONO,
-                     text_color=TEXT_DIM).pack(side="left")
-        ctk.CTkEntry(win, textvariable=self.var_di_axis, width=36,
-                      font=FONT_MONO, fg_color=BG, border_color=BORDER).pack(side="left", padx=3)
         ctk.CTkLabel(win, text="Centro (opc.)", width=80, font=FONT_MONO,
-                     text_color=TEXT_DIM).pack(side="left", padx=(6,0))
+                     text_color=TEXT_DIM).pack(side="left")
         ctk.CTkEntry(win, textvariable=self.var_center, width=64,
                       font=FONT_MONO, fg_color=BG, border_color=BORDER).pack(side="left", padx=3)
 
         winbtn = ctk.CTkFrame(ctrl, fg_color="transparent")
         winbtn.pack(fill="x", pady=(3,0))
-        ctk.CTkButton(winbtn, text="💾 Aplicar en Windows (fijo)",
+        self.btn_aplicar = ctk.CTkButton(winbtn, text="Aplicar a este pedal",
                        height=26, fg_color=BORDER, hover_color="#2a2f3d",
                        text_color=self.color, font=("Segoe UI", 9, "bold"),
-                       command=self._aplicar_calibracion_windows
-                       ).pack(side="left", fill="x", expand=True)
+                       command=self._aplicar_calibracion_windows)
+        self.btn_aplicar.pack(side="left", fill="x", expand=True)
 
-    def _aplicar_calibracion_windows(self):
-        """Escribe MIN/MAX/CENTRO de este pedal en el registro de Windows,
-        para que quede fijo en DirectInput aunque se cierre la app.
-        Solo MIN/MAX/centro — la curva y el deadzone no se pueden llevar
-        al sistema, eso sigue viviendo solo en esta app."""
+        self.lbl_win_status = ctk.CTkLabel(ctrl, text="Registro Windows: (sin consultar)",
+                       font=("Segoe UI", 9), text_color=TEXT_DIM, anchor="w")
+        self.lbl_win_status.pack(fill="x", pady=(2,0))
+        self.after(300, self._refrescar_estado_windows)
+
+        # si el usuario retoca MIN/MAX/Centro despues de aplicar, reactivo el boton
+        for v in (self.var_min, self.var_max, self.var_center):
+            v.trace_add("write", lambda *_: self.btn_aplicar.configure(state="normal"))
+
+    def _get_vid_pid_axis(self, show_errors=True):
+        """Devuelve (vid, pid, axis_index) o (None, None, None) si falta algo."""
         if not WINREG_OK:
-            messagebox.showerror("No disponible",
-                "Esta función solo funciona en Windows.")
-            return
-
+            if show_errors:
+                messagebox.showerror("No disponible", "Esta función solo funciona en Windows.")
+            return None, None, None
         js = getattr(self.app, "joystick", None)
         if js is None:
-            messagebox.showerror("Sin dispositivo",
-                "No hay ningún joystick/pedalera conectado ahora mismo.")
-            return
-
+            if show_errors:
+                messagebox.showerror("Sin dispositivo",
+                    "No hay ningún joystick/pedalera conectado ahora mismo.")
+            return None, None, None
         try:
             guid = js.get_guid()
         except Exception:
             guid = None
         vid, pid = _guid_to_vid_pid(guid) if guid else (None, None)
-
         if vid is None or pid is None:
-            messagebox.showerror("No se pudo identificar el dispositivo",
-                "No pude leer el VID/PID de la pedalera automáticamente.")
+            if show_errors:
+                messagebox.showerror("No se pudo identificar el dispositivo",
+                    "No pude leer el VID/PID de la pedalera automáticamente.")
+            return None, None, None
+        try:
+            axis_index = int(self.var_di_axis.get())
+        except ValueError:
+            if show_errors:
+                messagebox.showerror("Eje inválido", "El campo 'Eje DirectInput' debe ser un número.")
+            return None, None, None
+        return vid, pid, axis_index
+
+    def _refrescar_estado_windows(self):
+        """Lee lo que hay HOY guardado en el registro para este eje y lo
+        muestra, para que no haya dudas de si se aplicó o no. También lo
+        cachea para poder simular la barra 'como lo ve Windows'."""
+        vid, pid, axis_index = self._get_vid_pid_axis(show_errors=False)
+        if vid is None:
+            self.lbl_win_status.configure(text="Registro Windows: (sin dispositivo/eje válido)")
+            self._win_cal = None
+        else:
+            current = read_windows_calibration(vid, pid, axis_index)
+            self._win_cal = current
+            if current is None:
+                self.lbl_win_status.configure(
+                    text=f"Registro Windows (eje #{axis_index}): sin calibración guardada")
+            else:
+                lo, ce, hi = current
+                self.lbl_win_status.configure(
+                    text=f"Registro Windows (eje #{axis_index}): MIN={lo}  CENTRO={ce}  MAX={hi}")
+        self.after(2000, self._refrescar_estado_windows)
+
+    def _windows_mapped(self, raw):
+        """Simula qué valor (0..1) le entregaría DirectInput a un juego,
+        usando la calibración que HOY está guardada en el registro de
+        Windows (no la que estás editando en la app)."""
+        if not self._win_cal:
+            return 0.0
+        lo, ce, hi = self._win_cal
+        if ce == lo:
+            span = hi - lo
+            t = (raw - lo) / span if span else 0.0
+            return max(0.0, min(1.0, t))
+        if raw <= ce:
+            span = ce - lo
+            t = (raw - lo) / span if span else 0.0
+            do = -32768 + t * 32768
+        else:
+            span = hi - ce
+            t = (raw - ce) / span if span else 0.0
+            do = t * 32767
+        return max(0.0, min(1.0, (do + 32768) / 65535))
+
+    def _aplicar_calibracion_windows(self):
+        """Escribe MIN/MAX/CENTRO de este pedal en el registro de Windows,
+        para que quede fijo en DirectInput aunque se cierre la app.
+        Solo MIN/MAX/centro — la curva no se puede llevar al sistema, eso
+        sigue viviendo solo en esta app."""
+        vid, pid, axis_index = self._get_vid_pid_axis(show_errors=False)
+        if vid is None:
+            self.lbl_win_status.configure(text="❌ No se pudo aplicar: sin dispositivo conectado")
             return
 
         try:
-            axis_index = int(self.var_di_axis.get())
             raw_min = int(self.var_min.get())
             raw_max = int(self.var_max.get())
             raw_center = int(self.var_center.get()) if self.var_center.get().strip() else raw_min
         except ValueError:
-            messagebox.showerror("Valores inválidos",
-                "Revisá que Eje/MIN/MAX/Centro sean números enteros.")
+            self.lbl_win_status.configure(text="❌ No se pudo aplicar: MIN/MAX/Centro inválidos")
             return
 
-        confirm = messagebox.askyesno(
-            "Confirmar calibración fija en Windows",
-            f"Vas a escribir esta calibración en el registro de Windows "
-            f"para el eje DirectInput #{axis_index} del dispositivo "
-            f"VID_{vid:04X}&PID_{pid:04X}:\n\n"
-            f"  MIN={raw_min}  CENTRO={raw_center}  MAX={raw_max}\n\n"
-            f"Esto va a afectar a TODOS los juegos que usen ese eje, "
-            f"no solo este calibrador, y queda así hasta que se pise de "
-            f"nuevo (con este botón, con DXTweak2, o con el asistente de "
-            f"calibración de Windows).\n\n"
-            f"Si ya había algo calibrado ahí, se hace un backup local antes "
-            f"de pisarlo.\n\n¿Confirmás que el eje DirectInput es el correcto?"
-        )
-        if not confirm:
-            return
-
-        backup_path = backup_windows_calibration(vid, pid, axis_index, self.label)
+        backup_windows_calibration(vid, pid, axis_index, self.label)
         try:
             write_windows_calibration(vid, pid, axis_index, raw_min, raw_center, raw_max)
-        except Exception as e:
-            messagebox.showerror("Error al escribir", str(e))
+        except Exception:
+            self.lbl_win_status.configure(text="❌ No se pudo escribir en el registro")
             return
 
-        msg = f"Calibración de '{self.label}' aplicada en Windows (eje #{axis_index})."
-        if backup_path:
-            msg += f"\n\nSe guardó un backup de lo anterior en:\n{backup_path}"
-        messagebox.showinfo("Listo", msg)
+        self.btn_aplicar.configure(state="disabled")
+        self._refrescar_estado_windows()
 
     def set_enabled(self, enabled: bool):
         """Atenúa o activa el panel según disponibilidad del eje."""
@@ -638,6 +670,7 @@ class AxisPanel(ctk.CTkFrame):
         else:
             out = apply_curve(raw_value, self.curve_var.get(), mn + dz_l, mx - dz_h, cp)
         self.bar.update_values(raw_value, out)
+        self.bar_win.update_values(raw_value, self._windows_mapped(raw_value))
         self.curve.set_live(out)
 
     def get_config(self):
