@@ -8,9 +8,17 @@ import pygame
 import json
 import os
 import math
+import struct
 import threading
 import time
+import datetime
 from tkinter import filedialog, messagebox
+
+try:
+    import winreg
+    WINREG_OK = True
+except ImportError:
+    WINREG_OK = False  # no estamos en Windows, la funcion de calibracion queda deshabilitada
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
@@ -93,6 +101,93 @@ def apply_curve(raw, curve_type, raw_min, raw_max, control_points=None):
                 return float(ys[i] + frac * (ys[i+1] - ys[i]))
         return t
     return t
+
+
+# ── Calibración persistente de Windows (DirectInput) ──────────────────────
+# Escribe MIN/MAX/CENTRO en el registro para que la calibración quede fija
+# a nivel sistema, para cualquier juego, aunque el calibrador esté cerrado.
+# OJO: esto NO puede guardar la curva de respuesta ni el deadzone — eso
+# sigue viviendo solo dentro de esta app. Windows solo entiende un mapeo
+# lineal (Min/Centro/Max) por eje.
+
+BACKUP_DIR = os.path.join(os.path.expanduser("~"), ".vr_calibrador_backups")
+
+
+def _guid_to_vid_pid(guid_hex):
+    """Extrae VID/PID del GUID que entrega pygame/SDL para el joystick.
+    Formato típico en Windows: [bus(2)][crc(2)][vendor(2)][0(2)][product(2)][0(2)][version(2)][0(2)]
+    Si el device no sigue este layout puede no dar un VID/PID válido —
+    por eso siempre se puede pisar a mano en la UI."""
+    try:
+        raw = bytes.fromhex(guid_hex)
+        vendor  = struct.unpack("<H", raw[4:6])[0]
+        product = struct.unpack("<H", raw[8:10])[0]
+        return vendor, product
+    except Exception:
+        return None, None
+
+
+def _calibration_key_path(vid, pid, axis_index):
+    return (
+        r"System\CurrentControlSet\Control\MediaProperties\PrivateProperties"
+        rf"\DirectInput\VID_{vid:04X}&PID_{pid:04X}\Calibration\0\Type\Axes\{axis_index}"
+    )
+
+
+def read_windows_calibration(vid, pid, axis_index):
+    """Devuelve (lMin, lCenter, lMax) actuales, o None si no hay nada guardado."""
+    if not WINREG_OK:
+        return None
+    path = _calibration_key_path(vid, pid, axis_index)
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_READ)
+        data, _ = winreg.QueryValueEx(key, "Calibration")
+        winreg.CloseKey(key)
+        if len(data) >= 12:
+            return struct.unpack("<iii", data[:12])
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
+    return None
+
+
+def backup_windows_calibration(vid, pid, axis_index, axis_label):
+    """Guarda la calibración actual (si existe) en un json local, antes de pisarla."""
+    current = read_windows_calibration(vid, pid, axis_index)
+    if current is None:
+        return None  # no había nada que respaldar
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    fname = f"backup_VID{vid:04X}_PID{pid:04X}_axis{axis_index}_{ts}.json"
+    fpath = os.path.join(BACKUP_DIR, fname)
+    with open(fpath, "w", encoding="utf-8") as f:
+        json.dump({
+            "vid": vid, "pid": pid, "axis_index": axis_index,
+            "axis_label": axis_label,
+            "lMin": current[0], "lCenter": current[1], "lMax": current[2],
+            "timestamp": ts,
+        }, f, indent=2)
+    return fpath
+
+
+def write_windows_calibration(vid, pid, axis_index, raw_min, raw_center, raw_max):
+    """Escribe lMin/lCenter/lMax para el eje indicado. Requiere Windows."""
+    if not WINREG_OK:
+        raise RuntimeError("winreg no disponible: esta función solo corre en Windows.")
+    path = _calibration_key_path(vid, pid, axis_index)
+    key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE)
+    data = struct.pack("<iii", raw_min, raw_center, raw_max)
+    winreg.SetValueEx(key, "Calibration", 0, winreg.REG_BINARY, data)
+    winreg.CloseKey(key)
+
+
+def restore_windows_calibration(backup_path):
+    """Restaura una calibración desde un archivo de backup generado antes."""
+    with open(backup_path, encoding="utf-8") as f:
+        b = json.load(f)
+    write_windows_calibration(b["vid"], b["pid"], b["axis_index"],
+                               b["lMin"], b["lCenter"], b["lMax"])
 
 
 def _set_window_icon(window):
@@ -343,6 +438,11 @@ class AxisPanel(ctk.CTkFrame):
         self.var_dz_high = ctk.StringVar(value="0")
         self.curve_var   = ctk.StringVar(value="Lineal")
         self.var_invert  = ctk.BooleanVar(value=False)
+        # sugerido = mismo indice que usa pygame, pero HAY QUE CONFIRMARLO a mano
+        # (pygame y DirectInput no siempre numeran los ejes igual)
+        _hint = next((p["axis"] for p in PEDALES if p["key"] == axis_key), 0)
+        self.var_di_axis = ctk.StringVar(value=str(_hint))
+        self.var_center  = ctk.StringVar(value="")  # vacio = usa MIN como centro
 
         self._build()
 
@@ -413,6 +513,91 @@ class AxisPanel(ctk.CTkFrame):
                           fg_color=self.color, hover_color=self.color,
                           border_color=BORDER, checkbox_width=18,
                           checkbox_height=18).pack(side="left")
+
+        # ── Calibración fija de Windows (opcional, avanzado) ──
+        win = ctk.CTkFrame(ctrl, fg_color="transparent")
+        win.pack(fill="x", pady=(6,0))
+        ctk.CTkLabel(win, text="Eje DirectInput", width=90, font=FONT_MONO,
+                     text_color=TEXT_DIM).pack(side="left")
+        ctk.CTkEntry(win, textvariable=self.var_di_axis, width=36,
+                      font=FONT_MONO, fg_color=BG, border_color=BORDER).pack(side="left", padx=3)
+        ctk.CTkLabel(win, text="Centro (opc.)", width=80, font=FONT_MONO,
+                     text_color=TEXT_DIM).pack(side="left", padx=(6,0))
+        ctk.CTkEntry(win, textvariable=self.var_center, width=64,
+                      font=FONT_MONO, fg_color=BG, border_color=BORDER).pack(side="left", padx=3)
+
+        winbtn = ctk.CTkFrame(ctrl, fg_color="transparent")
+        winbtn.pack(fill="x", pady=(3,0))
+        ctk.CTkButton(winbtn, text="💾 Aplicar en Windows (fijo)",
+                       height=26, fg_color=BORDER, hover_color="#2a2f3d",
+                       text_color=self.color, font=("Segoe UI", 9, "bold"),
+                       command=self._aplicar_calibracion_windows
+                       ).pack(side="left", fill="x", expand=True)
+
+    def _aplicar_calibracion_windows(self):
+        """Escribe MIN/MAX/CENTRO de este pedal en el registro de Windows,
+        para que quede fijo en DirectInput aunque se cierre la app.
+        Solo MIN/MAX/centro — la curva y el deadzone no se pueden llevar
+        al sistema, eso sigue viviendo solo en esta app."""
+        if not WINREG_OK:
+            messagebox.showerror("No disponible",
+                "Esta función solo funciona en Windows.")
+            return
+
+        js = getattr(self.app, "joystick", None)
+        if js is None:
+            messagebox.showerror("Sin dispositivo",
+                "No hay ningún joystick/pedalera conectado ahora mismo.")
+            return
+
+        try:
+            guid = js.get_guid()
+        except Exception:
+            guid = None
+        vid, pid = _guid_to_vid_pid(guid) if guid else (None, None)
+
+        if vid is None or pid is None:
+            messagebox.showerror("No se pudo identificar el dispositivo",
+                "No pude leer el VID/PID de la pedalera automáticamente.")
+            return
+
+        try:
+            axis_index = int(self.var_di_axis.get())
+            raw_min = int(self.var_min.get())
+            raw_max = int(self.var_max.get())
+            raw_center = int(self.var_center.get()) if self.var_center.get().strip() else raw_min
+        except ValueError:
+            messagebox.showerror("Valores inválidos",
+                "Revisá que Eje/MIN/MAX/Centro sean números enteros.")
+            return
+
+        confirm = messagebox.askyesno(
+            "Confirmar calibración fija en Windows",
+            f"Vas a escribir esta calibración en el registro de Windows "
+            f"para el eje DirectInput #{axis_index} del dispositivo "
+            f"VID_{vid:04X}&PID_{pid:04X}:\n\n"
+            f"  MIN={raw_min}  CENTRO={raw_center}  MAX={raw_max}\n\n"
+            f"Esto va a afectar a TODOS los juegos que usen ese eje, "
+            f"no solo este calibrador, y queda así hasta que se pise de "
+            f"nuevo (con este botón, con DXTweak2, o con el asistente de "
+            f"calibración de Windows).\n\n"
+            f"Si ya había algo calibrado ahí, se hace un backup local antes "
+            f"de pisarlo.\n\n¿Confirmás que el eje DirectInput es el correcto?"
+        )
+        if not confirm:
+            return
+
+        backup_path = backup_windows_calibration(vid, pid, axis_index, self.label)
+        try:
+            write_windows_calibration(vid, pid, axis_index, raw_min, raw_center, raw_max)
+        except Exception as e:
+            messagebox.showerror("Error al escribir", str(e))
+            return
+
+        msg = f"Calibración de '{self.label}' aplicada en Windows (eje #{axis_index})."
+        if backup_path:
+            msg += f"\n\nSe guardó un backup de lo anterior en:\n{backup_path}"
+        messagebox.showinfo("Listo", msg)
 
     def set_enabled(self, enabled: bool):
         """Atenúa o activa el panel según disponibilidad del eje."""
