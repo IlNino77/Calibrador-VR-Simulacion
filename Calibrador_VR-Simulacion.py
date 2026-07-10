@@ -72,9 +72,9 @@ def _build_logo_photo(size):
 CURVE_TYPES = ["Lineal", "Exponencial", "Logarítmica", "S-Curve", "Personalizada"]
 
 PEDALES = [
-    {"key": "acelerador", "label": "Acelerador", "color": ACCENT,  "axis": 0},  # RyAxis → pedal acelerador
-    {"key": "freno",      "label": "Freno",       "color": ACCENT2, "axis": 1},  # Throttle → pedal freno
     {"key": "embrague",   "label": "Embrague",    "color": ACCENT3, "axis": 2},  # Brake → pedal embrague
+    {"key": "freno",      "label": "Freno",       "color": ACCENT2, "axis": 1},  # Throttle → pedal freno
+    {"key": "acelerador", "label": "Acelerador", "color": ACCENT,  "axis": 0},  # RyAxis → pedal acelerador
 ]
 
 
@@ -288,6 +288,7 @@ class CurveCanvas(ctk.CTkCanvas):
         self.control_points = [(0.25, 0.20), (0.50, 0.50), (0.75, 0.80)]
         self._dragging  = None
         self._disabled = False
+        self.on_points_changed = None  # callback opcional: se llama cuando cambian los puntos
         self.bind("<Configure>",       self._redraw)
         self.bind("<Button-1>",        self._on_click)
         self.bind("<B1-Motion>",       self._on_drag)
@@ -343,6 +344,8 @@ class CurveCanvas(ctk.CTkCanvas):
             x = max(pts[1][0] + m, min(x, 1.0 - m))
         self.control_points[self._dragging] = (x, y)
         self._redraw()
+        if self.on_points_changed:
+            self.on_points_changed()
 
     def _on_release(self, event):
         self._dragging = None
@@ -353,6 +356,8 @@ class CurveCanvas(ctk.CTkCanvas):
     def set_points(self, pts):
         self.control_points = [(p[0], p[1]) for p in pts]
         self._redraw()
+        if self.on_points_changed:
+            self.on_points_changed()
 
     # ─── Público ─────────────────────────────────────────────────────────────
     def set_disabled(self, disabled: bool):
@@ -442,7 +447,6 @@ class AxisPanel(ctk.CTkFrame):
         # (pygame y DirectInput no siempre numeran los ejes igual)
         _hint = next((p["axis"] for p in PEDALES if p["key"] == axis_key), 0)
         self.var_di_axis = ctk.StringVar(value=str(_hint))
-        self.var_center  = ctk.StringVar(value="")  # vacio = usa MIN como centro
         self._win_cal    = None  # (lo, ce, hi) cacheado del registro, o None
 
         self._build()
@@ -459,10 +463,10 @@ class AxisPanel(ctk.CTkFrame):
         top = ctk.CTkFrame(self, fg_color="transparent")
         top.pack(fill="both", expand=True, padx=8)
 
-        self.bar = PedalCanvas(top, self.label, self.color, width=70, height=180)
+        self.bar = PedalCanvas(top, "Lectura", "#6b7280", width=70, height=180)
         self.bar.pack(side="left", fill="y", padx=(0,4))
 
-        self.bar_win = PedalCanvas(top, "WIN", "#6b7280", width=70, height=180)
+        self.bar_win = PedalCanvas(top, self.label, self.color, width=70, height=180)
         self.bar_win.pack(side="left", fill="y", padx=(0,6))
 
         self.curve = CurveCanvas(top, width=140, height=180)
@@ -497,6 +501,8 @@ class AxisPanel(ctk.CTkFrame):
                            command=lambda v: self.curve.set_curve(v)
                            ).pack(side="left", padx=3)
 
+        # (los puntos de la curva "Personalizada" se ajustan arrastrando en el gráfico)
+
         inv = ctk.CTkFrame(ctrl, fg_color="transparent")
         inv.pack(fill="x", pady=(3,0))
         ctk.CTkCheckBox(inv, text="Invertir pedal",
@@ -508,13 +514,6 @@ class AxisPanel(ctk.CTkFrame):
                           checkbox_height=18).pack(side="left")
 
         # ── Calibración fija de Windows ──
-        win = ctk.CTkFrame(ctrl, fg_color="transparent")
-        win.pack(fill="x", pady=(6,0))
-        ctk.CTkLabel(win, text="Centro (opc.)", width=80, font=FONT_MONO,
-                     text_color=TEXT_DIM).pack(side="left")
-        ctk.CTkEntry(win, textvariable=self.var_center, width=64,
-                      font=FONT_MONO, fg_color=BG, border_color=BORDER).pack(side="left", padx=3)
-
         winbtn = ctk.CTkFrame(ctrl, fg_color="transparent")
         winbtn.pack(fill="x", pady=(3,0))
         self.btn_aplicar = ctk.CTkButton(winbtn, text="Aplicar a este pedal",
@@ -529,7 +528,7 @@ class AxisPanel(ctk.CTkFrame):
         self.after(300, self._refrescar_estado_windows)
 
         # si el usuario retoca MIN/MAX/Centro despues de aplicar, reactivo el boton
-        for v in (self.var_min, self.var_max, self.var_center):
+        for v in (self.var_min, self.var_max):
             v.trace_add("write", lambda *_: self.btn_aplicar.configure(state="normal"))
 
     def _get_vid_pid_axis(self, show_errors=True):
@@ -606,8 +605,9 @@ class AxisPanel(ctk.CTkFrame):
     def _aplicar_calibracion_windows(self):
         """Escribe MIN/MAX/CENTRO de este pedal en el registro de Windows,
         para que quede fijo en DirectInput aunque se cierre la app.
-        Solo MIN/MAX/centro — la curva no se puede llevar al sistema, eso
-        sigue viviendo solo en esta app."""
+        Solo MIN/MAX — la curva no se puede llevar al sistema, eso sigue
+        viviendo solo en esta app. El centro se fija igual al MIN (comportamiento
+        estándar para un pedal, que solo viaja en un sentido)."""
         vid, pid, axis_index = self._get_vid_pid_axis(show_errors=False)
         if vid is None:
             self.lbl_win_status.configure(text="❌ No se pudo aplicar: sin dispositivo conectado")
@@ -616,9 +616,9 @@ class AxisPanel(ctk.CTkFrame):
         try:
             raw_min = int(self.var_min.get())
             raw_max = int(self.var_max.get())
-            raw_center = int(self.var_center.get()) if self.var_center.get().strip() else raw_min
+            raw_center = raw_min
         except ValueError:
-            self.lbl_win_status.configure(text="❌ No se pudo aplicar: MIN/MAX/Centro inválidos")
+            self.lbl_win_status.configure(text="❌ No se pudo aplicar: MIN/MAX inválidos")
             return
 
         backup_windows_calibration(vid, pid, axis_index, self.label)
@@ -641,9 +641,10 @@ class AxisPanel(ctk.CTkFrame):
             if isinstance(widget, ctk.CTkLabel):
                 widget.configure(text_color=col_label)
                 break
-        self.bar.color = col_bar
+        self.bar_win.color = col_bar
         if not enabled:
             self.bar.update_values(0, 0.0)
+            self.bar_win.update_values(0, 0.0)
             # le aviso al canvas que muestre el cartel de sin eje
             self.curve.set_disabled(True)
         else:
@@ -651,7 +652,7 @@ class AxisPanel(ctk.CTkFrame):
         self._redraw_bar()
 
     def _redraw_bar(self):
-        self.bar._redraw()
+        self.bar_win._redraw()
 
     def update_display(self, raw_value):
         raw_value = self._raw_corrected(raw_value)
