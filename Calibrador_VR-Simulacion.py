@@ -7,7 +7,6 @@ import customtkinter as ctk
 import pygame
 import json
 import os
-import math
 import struct
 import threading
 import time
@@ -69,8 +68,6 @@ def _build_logo_photo(size):
     except Exception:
         return None
 
-CURVE_TYPES = ["Lineal", "Exponencial", "Logarítmica", "S-Curve", "Personalizada"]
-
 PEDALES = [
     {"key": "embrague",   "label": "Embrague",    "color": ACCENT3, "axis": 2},  # Brake → pedal embrague
     {"key": "freno",      "label": "Freno",       "color": ACCENT2, "axis": 1},  # Throttle → pedal freno
@@ -78,37 +75,25 @@ PEDALES = [
 ]
 
 
-def apply_curve(raw, curve_type, raw_min, raw_max, control_points=None):
-    span = raw_max - raw_min
-    if span == 0:
-        return 0.0
-    t = max(0.0, min(1.0, (raw - raw_min) / span))
-    if curve_type == "Exponencial":
-        return t ** 2
-    elif curve_type == "Logarítmica":
-        return math.log1p(t * (math.e - 1))
-    elif curve_type == "S-Curve":
-        return t * t * (3 - 2 * t)
-    elif curve_type == "Personalizada" and control_points:
-        pts = [(0.0, 0.0)] + list(control_points) + [(1.0, 1.0)]
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
-        for i in range(len(xs) - 1):
-            if xs[i] <= t <= xs[i+1]:
-                if xs[i+1] == xs[i]:
-                    return float(ys[i])
-                frac = (t - xs[i]) / (xs[i+1] - xs[i])
-                return float(ys[i] + frac * (ys[i+1] - ys[i]))
-        return t
-    return t
+def two_segment(t, center):
+    """Los 2 tramos rectos que Windows/DirectInput soporta de verdad
+    (Min→Centro y Centro→Max). t y center van de 0 a 1. Con center=0.5
+    da una recta pura; movido a un lado u otro genera la progresión.
+    Esta es la MISMA cuenta que se manda al registro, así la app y
+    Windows quedan siempre iguales."""
+    t = max(0.0, min(1.0, t))
+    center = max(0.01, min(0.99, center))
+    if t <= center:
+        return 0.5 * (t / center)
+    return 0.5 + 0.5 * ((t - center) / (1 - center))
 
 
 # ── Calibración persistente de Windows (DirectInput) ──────────────────────
 # Escribe MIN/MAX/CENTRO en el registro para que la calibración quede fija
 # a nivel sistema, para cualquier juego, aunque el calibrador esté cerrado.
-# OJO: esto NO puede guardar la curva de respuesta ni el deadzone — eso
-# sigue viviendo solo dentro de esta app. Windows solo entiende un mapeo
-# lineal (Min/Centro/Max) por eje.
+# El Centro es, a la vez, el único ajuste de curva/progresión que existe:
+# Windows solo entiende 2 tramos rectos, así que la app usa exactamente
+# esa misma lógica para su vista previa. Lo que ves es lo que se aplica.
 
 BACKUP_DIR = os.path.join(os.path.expanduser("~"), ".vr_calibrador_backups")
 
@@ -282,18 +267,11 @@ class CurveCanvas(ctk.CTkCanvas):
 
     def __init__(self, master, **kwargs):
         super().__init__(master, bg=PANEL, highlightthickness=0, **kwargs)
-        self.curve_type = "Lineal"
-        self.live_pos   = 0.0
-        self._logo_ref  = None
-        self.control_points = [(0.25, 0.20), (0.50, 0.50), (0.75, 0.80)]
-        self._dragging  = None
+        self.center    = 0.5   # 0..1, fraccion del recorrido donde esta el "punto medio"
+        self.live_pos  = 0.0
+        self._logo_ref = None
         self._disabled = False
-        self.on_points_changed = None  # callback opcional: se llama cuando cambian los puntos
-        self.bind("<Configure>",       self._redraw)
-        self.bind("<Button-1>",        self._on_click)
-        self.bind("<B1-Motion>",       self._on_drag)
-        self.bind("<ButtonRelease-1>", self._on_release)
-        self.bind("<Motion>",          self._on_hover)
+        self.bind("<Configure>", self._redraw)
 
     @classmethod
     def get_logo(cls, w, h):
@@ -302,70 +280,15 @@ class CurveCanvas(ctk.CTkCanvas):
             cls._logo_cache[key] = _build_logo_photo(min(w, h))
         return cls._logo_cache[key]
 
-    # ─── Coordenadas ─────────────────────────────────────────────────────────
     def _pad(self): return 16
-
-    def _to_canvas(self, x, y):
-        w, h, p = self.winfo_width(), self.winfo_height(), self._pad()
-        return p + x * (w - 2*p), p + (1 - y) * (h - 2*p)
-
-    def _to_norm(self, cx, cy):
-        w, h, p = self.winfo_width(), self.winfo_height(), self._pad()
-        iw, ih = w - 2*p, h - 2*p
-        return (cx - p) / iw if iw else 0, 1.0 - (cy - p) / ih if ih else 0
-
-    def _hit(self, ex, ey, r=10):
-        for i, (px, py) in enumerate(self.control_points):
-            cx, cy = self._to_canvas(px, py)
-            if abs(ex - cx) <= r and abs(ey - cy) <= r:
-                return i
-        return None
-
-    # ─── Mouse ───────────────────────────────────────────────────────────────
-    def _on_hover(self, event):
-        if self.curve_type == "Personalizada":
-            self.configure(cursor="fleur" if self._hit(event.x, event.y) is not None else "")
-
-    def _on_click(self, event):
-        if self.curve_type == "Personalizada":
-            self._dragging = self._hit(event.x, event.y)
-
-    def _on_drag(self, event):
-        if self._dragging is None:
-            return
-        x, y = self._to_norm(event.x, event.y)
-        x, y = max(0.0, min(1.0, x)), max(0.0, min(1.0, y))
-        pts, m = self.control_points, 0.08
-        if self._dragging == 0:
-            x = max(m, min(x, pts[1][0] - m))
-        elif self._dragging == 1:
-            x = max(pts[0][0] + m, min(x, pts[2][0] - m))
-        else:
-            x = max(pts[1][0] + m, min(x, 1.0 - m))
-        self.control_points[self._dragging] = (x, y)
-        self._redraw()
-        if self.on_points_changed:
-            self.on_points_changed()
-
-    def _on_release(self, event):
-        self._dragging = None
-
-    def get_points(self):
-        return [list(p) for p in self.control_points]
-
-    def set_points(self, pts):
-        self.control_points = [(p[0], p[1]) for p in pts]
-        self._redraw()
-        if self.on_points_changed:
-            self.on_points_changed()
 
     # ─── Público ─────────────────────────────────────────────────────────────
     def set_disabled(self, disabled: bool):
         self._disabled = disabled
         self._redraw()
 
-    def set_curve(self, v):
-        self.curve_type = v
+    def set_center(self, center):
+        self.center = max(0.01, min(0.99, center))
         self._redraw()
 
     def set_live(self, pos):
@@ -395,29 +318,23 @@ class CurveCanvas(ctk.CTkCanvas):
         self.create_line(pad, pad+ih, pad+iw, pad+ih, fill=TEXT_DIM, width=1)
         self.create_line(pad, pad, pad, pad+ih, fill=TEXT_DIM, width=1)
 
-        # dibujo la curva posta
-        cp = self.control_points if self.curve_type == "Personalizada" else None
+        # dibujo la curva posta: 2 tramos rectos, igual a lo que hace Windows
         pts = []
-        for i in range(81):
-            t = i / 80
-            out = apply_curve(t, self.curve_type, 0, 1, cp)
+        for i in range(41):
+            t = i / 40
+            out = two_segment(t, self.center)
             pts.extend([pad + int(t * iw), pad + ih - int(out * ih)])
         if len(pts) >= 4:
-            self.create_line(*pts, fill=ACCENT, width=2, smooth=True)
+            self.create_line(*pts, fill=ACCENT, width=2)
 
-        # los puntitos que se arrastran, solo si es curva Personalizada
-        if self.curve_type == "Personalizada":
-            for i, (px, py) in enumerate(self.control_points):
-                cx, cy = self._to_canvas(px, py)
-                col = "#ffffff" if self._dragging == i else ACCENT
-                self.create_oval(cx-7, cy-7, cx+7, cy+7,
-                                 fill=col, outline=PANEL, width=2)
-                # las lineas punteadas de guia
-                self.create_line(cx, cy, cx, pad+ih, fill=BORDER, dash=(3,5))
-                self.create_line(pad, cy, cx, cy,   fill=BORDER, dash=(3,5))
+        # marco el punto medio en el grafico (informativo, no se arrastra)
+        cx = pad + int(self.center * iw)
+        cy = pad + ih - int(0.5 * ih)
+        self.create_oval(cx-6, cy-6, cx+6, cy+6, fill=ACCENT, outline=PANEL, width=2)
+        self.create_line(cx, cy, cx, pad+ih, fill=BORDER, dash=(3,5))
 
         # el puntito que se mueve en vivo con el pedal
-        out_live = apply_curve(self.live_pos, self.curve_type, 0, 1, cp)
+        out_live = two_segment(self.live_pos, self.center)
         lx = pad + int(self.live_pos * iw)
         ly = pad + ih - int(out_live * ih)
         self.create_oval(lx-5, ly-5, lx+5, ly+5, fill=ACCENT, outline="")
@@ -441,7 +358,7 @@ class AxisPanel(ctk.CTkFrame):
         self.var_max     = ctk.StringVar(value="65535")
         self.var_dz_low  = ctk.StringVar(value="0")
         self.var_dz_high = ctk.StringVar(value="0")
-        self.curve_var   = ctk.StringVar(value="Lineal")
+        self.var_center_pct = ctk.StringVar(value="50")  # %, 50 = recta pura
         self.var_invert  = ctk.BooleanVar(value=False)
         # sugerido = mismo indice que usa pygame, pero HAY QUE CONFIRMARLO a mano
         # (pygame y DirectInput no siempre numeran los ejes igual)
@@ -454,6 +371,14 @@ class AxisPanel(ctk.CTkFrame):
     def _raw_corrected(self, raw):
         """Corrige el sentido del eje si el pedal reporta la medición invertida."""
         return (65535 - raw) if self.var_invert.get() else raw
+
+    def _aplicar_centro_curva(self):
+        try:
+            pct = max(1, min(99, float(self.var_center_pct.get())))
+        except ValueError:
+            pct = 50
+        self.var_center_pct.set(str(int(pct)))
+        self.curve.set_center(pct / 100)
 
     def _build(self):
         ctk.CTkLabel(self, text=self.label.upper(),
@@ -492,16 +417,15 @@ class AxisPanel(ctk.CTkFrame):
 
         cr = ctk.CTkFrame(ctrl, fg_color="transparent")
         cr.pack(fill="x", pady=3)
-        ctk.CTkLabel(cr, text="Curva", width=55, font=FONT_MONO,
+        ctk.CTkLabel(cr, text="Centro (%)", width=70, font=FONT_MONO,
                      text_color=TEXT_DIM).pack(side="left")
-        ctk.CTkOptionMenu(cr, values=CURVE_TYPES, variable=self.curve_var,
-                           fg_color=BORDER, button_color="#2a2f3d",
-                           button_hover_color=ACCENT, dropdown_fg_color=PANEL,
-                           font=FONT_UI, width=130,
-                           command=lambda v: self.curve.set_curve(v)
-                           ).pack(side="left", padx=3)
-
-        # (los puntos de la curva "Personalizada" se ajustan arrastrando en el gráfico)
+        e_centro = ctk.CTkEntry(cr, textvariable=self.var_center_pct, width=52,
+                      font=FONT_MONO, fg_color=BG, border_color=BORDER)
+        e_centro.pack(side="left", padx=3)
+        e_centro.bind("<Return>",   lambda ev: self._aplicar_centro_curva())
+        e_centro.bind("<FocusOut>", lambda ev: self._aplicar_centro_curva())
+        ctk.CTkLabel(cr, text="50 = recta. Más alto = progresivo.",
+                     font=("Segoe UI", 8), text_color=TEXT_DIM).pack(side="left", padx=(4,0))
 
         inv = ctk.CTkFrame(ctrl, fg_color="transparent")
         inv.pack(fill="x", pady=(3,0))
@@ -528,7 +452,7 @@ class AxisPanel(ctk.CTkFrame):
         self.after(300, self._refrescar_estado_windows)
 
         # si el usuario retoca MIN/MAX/Centro despues de aplicar, reactivo el boton
-        for v in (self.var_min, self.var_max):
+        for v in (self.var_min, self.var_max, self.var_center_pct):
             v.trace_add("write", lambda *_: self.btn_aplicar.configure(state="normal"))
 
     def _get_vid_pid_axis(self, show_errors=True):
@@ -603,11 +527,11 @@ class AxisPanel(ctk.CTkFrame):
         return max(0.0, min(1.0, (do + 32768) / 65535))
 
     def _aplicar_calibracion_windows(self):
-        """Escribe MIN/MAX/CENTRO de este pedal en el registro de Windows,
+        """Escribe MIN/CENTRO/MAX de este pedal en el registro de Windows,
         para que quede fijo en DirectInput aunque se cierre la app.
-        Solo MIN/MAX — la curva no se puede llevar al sistema, eso sigue
-        viviendo solo en esta app. El centro se fija igual al MIN (comportamiento
-        estándar para un pedal, que solo viaja en un sentido)."""
+        El Centro es el mismo que ajustaste en 'Centro (%)' — es lo único
+        que Windows entiende como progresión, así que la app y el registro
+        quedan siempre iguales."""
         vid, pid, axis_index = self._get_vid_pid_axis(show_errors=False)
         if vid is None:
             self.lbl_win_status.configure(text="❌ No se pudo aplicar: sin dispositivo conectado")
@@ -616,9 +540,10 @@ class AxisPanel(ctk.CTkFrame):
         try:
             raw_min = int(self.var_min.get())
             raw_max = int(self.var_max.get())
-            raw_center = raw_min
+            center_frac = max(0.01, min(0.99, float(self.var_center_pct.get()) / 100))
+            raw_center = int(round(raw_min + center_frac * (raw_max - raw_min)))
         except ValueError:
-            self.lbl_win_status.configure(text="❌ No se pudo aplicar: MIN/MAX inválidos")
+            self.lbl_win_status.configure(text="❌ No se pudo aplicar: MIN/MAX/Centro inválidos")
             return
 
         backup_windows_calibration(vid, pid, axis_index, self.label)
@@ -661,40 +586,35 @@ class AxisPanel(ctk.CTkFrame):
             mx   = int(self.var_max.get())
             dz_l = int(self.var_dz_low.get()  or 0)
             dz_h = int(self.var_dz_high.get() or 0)
+            center_frac = max(0.01, min(0.99, float(self.var_center_pct.get()) / 100))
         except ValueError:
-            mn, mx, dz_l, dz_h = 0, 65535, 0, 0
-        cp = self.curve.get_points() if self.curve_var.get() == "Personalizada" else None
-        if raw_value < mn + dz_l:
-            out = 0.0
-        elif raw_value > mx - dz_h:
-            out = 1.0
-        else:
-            out = apply_curve(raw_value, self.curve_var.get(), mn + dz_l, mx - dz_h, cp)
+            mn, mx, dz_l, dz_h, center_frac = 0, 65535, 0, 0, 0.5
+        lo, hi = mn + dz_l, mx - dz_h
+        span = hi - lo
+        t = 0.0 if span <= 0 else max(0.0, min(1.0, (raw_value - lo) / span))
+        out = two_segment(t, center_frac)
         self.bar.update_values(raw_value, out)
         self.bar_win.update_values(raw_value, self._windows_mapped(raw_value))
-        self.curve.set_live(out)
+        self.curve.set_live(t)
 
     def get_config(self):
         return {
             "min":            int(self.var_min.get()      or 0),
             "max":            int(self.var_max.get()      or 65535),
-            "curve":          self.curve_var.get(),
+            "center_pct":     float(self.var_center_pct.get() or 50),
             "deadzone_low":   int(self.var_dz_low.get()  or 0),
             "deadzone_high":  int(self.var_dz_high.get() or 0),
-            "control_points": self.curve.get_points(),
             "invert":         bool(self.var_invert.get()),
         }
 
     def load_config(self, cfg):
         self.var_min.set(str(cfg.get("min", 0)))
         self.var_max.set(str(cfg.get("max", 65535)))
-        self.curve_var.set(cfg.get("curve", "Lineal"))
+        self.var_center_pct.set(str(cfg.get("center_pct", 50)))
         self.var_dz_low.set(str(cfg.get("deadzone_low", 0)))
         self.var_dz_high.set(str(cfg.get("deadzone_high", 0)))
         self.var_invert.set(bool(cfg.get("invert", False)))
-        if "control_points" in cfg:
-            self.curve.set_points(cfg["control_points"])
-        self.curve.set_curve(self.curve_var.get())
+        self._aplicar_centro_curva()
 
 
 class VRCalibrador(ctk.CTk):
@@ -780,7 +700,9 @@ class VRCalibrador(ctk.CTk):
         footer = ctk.CTkFrame(self, fg_color=PANEL, height=28, corner_radius=0)
         footer.pack(fill="x", side="bottom")
         footer.pack_propagate(False)
-        ctk.CTkLabel(footer, text="VR-Simulacion |  Calibrador v1.8",
+        ctk.CTkLabel(footer, text="por Nino (IlNino77)",
+                     font=("Courier New", 9), text_color=TEXT_DIM).pack(side="left", padx=12)
+        ctk.CTkLabel(footer, text="VR-Simulacion |  Calibrador v2.2",
                      font=("Courier New", 9), text_color=TEXT_DIM).pack(side="right", padx=12)
 
     def _connect_joystick(self):

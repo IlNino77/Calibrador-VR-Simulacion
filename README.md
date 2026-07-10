@@ -1,6 +1,6 @@
 # Calibrador VR-Simulación
 
-Calibrador para pedaleras de sim racing (throttle, brake, clutch) sobre HID/Arduino. Permite ajustar mín/máx, deadzone, curva de respuesta e inversión de eje por pedal, con vista previa en vivo.
+Calibrador para pedaleras de sim racing (throttle, brake, clutch) sobre HID/Arduino. Permite ajustar mín/máx, deadzone, punto medio de progresión e inversión de eje por pedal, con vista previa en vivo — y, opcionalmente, dejar esa calibración fija a nivel Windows (DirectInput) para que se aplique en cualquier juego, sin depender de tener la app abierta.
 
 ## Funcionalidades
 
@@ -8,8 +8,9 @@ Calibrador para pedaleras de sim racing (throttle, brake, clutch) sobre HID/Ardu
 - Panel independiente por pedal (acelerador, freno, embrague), con auto-detección de cuántos ejes tiene el volante/pedalera.
 - Captura de MIN/MAX con un click, directo desde el pedal físico.
 - Deadzone configurable en el extremo inferior y superior de cada eje.
-- 5 curvas de respuesta: Lineal, Exponencial, Logarítmica, S-Curve y Personalizada (con puntos de control arrastrables).
+- **Centro (%) ajustable**: un único control de progresión (25%–99%) que define los 2 tramos rectos de la curva de respuesta — la misma lógica de 2 segmentos que usa DirectInput internamente, así lo que ves en la app es exactamente lo que se aplica en Windows.
 - Checkbox de **inversión de eje**, para pedaleras que reportan la medición al revés.
+- **Calibración fija en Windows**: botón "Aplicar a este pedal" que escribe MIN/CENTRO/MAX directo en el registro de DirectInput, para que quede persistente en cualquier juego aunque cierres la app. Se hace backup automático de la calibración anterior antes de pisarla.
 - Perfiles de calibración guardables/cargables en `.json`.
 
 ## Requisitos (para correr desde el código fuente)
@@ -50,6 +51,10 @@ pyinstaller --onefile --windowed --icon=logosolovr.ico --name=VR-Calibrador --co
 El `.ico` (`logosolovr.ico`) ya está en la raíz del repo. El ejecutable resultante queda en la carpeta `dist/`, con el ícono de la marca aplicado tanto en el archivo como en la ventana en tiempo de ejecución.
 
 > El workflow automático de GitHub Actions (`.github/workflows/build.yml`) usa exactamente este mismo comando, así que el `.exe` que bajás de la pestaña Actions es idéntico al que se distribuye a clientes (mismo ícono, mismo build).
+
+## Créditos
+
+Desarrollado por **Nino** ([@IlNino77](https://github.com/IlNino77)).
 
 ## Licencia
 
